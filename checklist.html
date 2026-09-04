@@ -31,23 +31,42 @@
       .then(function(r){return r.text().then(function(t){return t?JSON.parse(t):null;});});
   }
   function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
-  async function callApi(name,args){
-    var req=await enc({name:name,args:args});
-    var ins=await sreq('POST','jobs',{req:req},'return=representation');
-    var id=ins&&ins[0]&&ins[0].id;
-    if(!id) return {ok:false,msg:'リレー投入に失敗しました'};
-    for(var i=0;i<180;i++){
-      await sleep(500);
-      var rows=await sreq('GET','jobs?id=eq.'+id+'&select=res,done');
-      if(rows&&rows[0]&&rows[0].done){
-        var out;
-        try{ out=rows[0].res? await dec(rows[0].res):{ok:false,msg:'空の結果'}; }
-        catch(e){ out={ok:false,msg:'復号に失敗(合言葉不一致の可能性)'}; }
-        try{ sreq('DELETE','jobs?id=eq.'+id); }catch(e){}
-        return out;
-      }
+  var _busy=0;
+  function _spin(on){
+    var el=document.getElementById('__relaySpin');
+    if(!el){
+      el=document.createElement('div'); el.id='__relaySpin';
+      el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:150000;background:#1f3e54;color:#fff;text-align:center;padding:8px;font-family:sans-serif;font-size:13px;font-weight:700;box-shadow:0 2px 10px rgba(0,0,0,.25)';
+      el.innerHTML='<span style="display:inline-block;width:13px;height:13px;border:2px solid #9db8cb;border-top-color:#fff;border-radius:50%;vertical-align:-2px;margin-right:8px;animation:__sp 0.8s linear infinite"></span>処理中…';
+      if(!document.getElementById('__spStyle')){ var st=document.createElement('style'); st.id='__spStyle'; st.textContent='@keyframes __sp{to{transform:rotate(360deg)}}'; document.head.appendChild(st); }
+      document.body.appendChild(el);
     }
-    return {ok:false,msg:'応答待ちタイムアウト(PC側が起動中か確認してください)'};
+    el.style.display=on?'block':'none';
+  }
+  async function callApi(name,args){
+    _busy++; _spin(true);
+    try{
+      var req=await enc({name:name,args:args});
+      var ins=await sreq('POST','jobs',{req:req},'return=representation');
+      var id=ins&&ins[0]&&ins[0].id;
+      if(!id) return {ok:false,msg:'リレー投入に失敗しました'};
+      for(var i=0;i<80;i++){   // 最大~40秒
+        await sleep(500);
+        var rows=await sreq('GET','jobs?id=eq.'+id+'&select=res,done');
+        if(rows&&rows[0]&&rows[0].done){
+          try{ sreq('DELETE','jobs?id=eq.'+id); }catch(e){}
+          if(!rows[0].res) return {ok:false,msg:'空の結果'};
+          try{ return await dec(rows[0].res); }
+          catch(e){
+            localStorage.removeItem('relay_pass');
+            alert('合言葉が正しくないようです。もう一度入力してください。');
+            location.reload();
+            return {ok:false,msg:'合言葉エラー'};
+          }
+        }
+      }
+      return {ok:false,msg:'応答待ちタイムアウト（PC側の中継ワーカーが起動しているか確認してください）'};
+    } finally { _busy--; if(_busy<=0) _spin(false); }
   }
   // 前回調書 損傷一覧を画面内オーバーレイ(iframe=checklist.html)で開く
   function showChk(){
@@ -72,16 +91,34 @@
   window.__showChecklist=showChk;
   window.pywebview={api:new Proxy({},{get:function(_,n){return function(){
     var a=Array.prototype.slice.call(arguments);
+    // ライセンス機能はWeb版では使わない(内部版扱い)。中継せず即OKを返しゲートを出さない。
+    if(n==='license_status'||n==='license_set_key'){ return Promise.resolve({external:false, ok:true}); }
     return callApi(n,a).then(function(res){
       if((n==='prev_set_bridge'||n==='prev_set_bridge_for') && res && res.ok && !res.multiple){ try{ showChk(); }catch(e){} }
       return res;
     });
   };}})};
+  function askPass(msg){
+    return new Promise(function(resolve){
+      var ov=document.createElement('div');
+      ov.style.cssText='position:fixed;inset:0;z-index:200000;background:rgba(238,242,246,.98);display:flex;align-items:center;justify-content:center;font-family:sans-serif';
+      ov.innerHTML='<div style="background:#fff;border:1px solid #ccc;border-radius:12px;padding:22px;max-width:400px;width:90%">'
+        +'<h3 style="margin:0 0 10px;font-size:16px">合言葉</h3>'
+        +'<div style="font-size:13px;color:#555;margin-bottom:12px">'+(msg||'PC側ワーカーと同じ合言葉を入力してください。')+'</div>'
+        +'<input id="__pp" type="text" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false" inputmode="text" '
+        +'style="width:100%;box-sizing:border-box;padding:11px;font-size:16px;border:1px solid #ccc;border-radius:8px">'
+        +'<button id="__ppb" style="margin-top:12px;width:100%;padding:12px;background:#2d5673;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:15px">認証</button></div>';
+      document.body.appendChild(ov);
+      var inp=ov.querySelector('#__pp'), btn=ov.querySelector('#__ppb');
+      setTimeout(function(){ inp.focus(); }, 50);
+      function go(){ var v=(inp.value||'').trim(); if(!v) return; document.body.removeChild(ov); resolve(v); }
+      btn.onclick=go; inp.addEventListener('keydown',function(e){ if(e.key==='Enter') go(); });
+    });
+  }
   async function boot(){
     var pass=localStorage.getItem('relay_pass');
-    if(!pass){ pass=window.prompt('合言葉を入力してください（PC側ワーカーと同じもの）'); if(pass){ localStorage.setItem('relay_pass',pass); } }
-    if(!pass){ document.body.innerHTML='<p style="padding:20px;font-family:sans-serif">合言葉が必要です。ページを再読み込みして入力してください。</p>'; return; }
-    try{ _key=await deriveKey(pass); }catch(e){ alert('鍵の生成に失敗しました'); return; }
+    if(!pass){ pass=await askPass(); localStorage.setItem('relay_pass',pass); }
+    try{ _key=await deriveKey(pass); }catch(e){ localStorage.removeItem('relay_pass'); location.reload(); return; }
     window.dispatchEvent(new Event('pywebviewready'));
   }
   window.addEventListener('DOMContentLoaded', boot);
