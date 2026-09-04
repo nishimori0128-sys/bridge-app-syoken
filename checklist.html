@@ -118,6 +118,19 @@
   .btn:hover{background:var(--steel-d)}
   .btn.ghost{background:#fff;color:var(--steel)}
   .empty{text-align:center;color:#999;padding:24px}
+  /* スマホ向け(≤700px): 横スクロール＋文字縮小 */
+  @media (max-width:700px){
+    header{font-size:13px;padding:8px 12px}
+    .filters{padding:8px 10px;gap:5px}
+    .filters input{width:84px}
+    .filters input,.filters select{font-size:14px}
+    .wrap{padding:8px;overflow-x:auto}
+    table{font-size:11px;min-width:640px}
+    th,td{padding:4px 6px}
+    th{top:0}
+    .sh{max-width:220px}
+    .btn{padding:6px 10px}
+  }
 </style>
 </head>
 <body>

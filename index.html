@@ -260,6 +260,29 @@
   .licbtns{display:flex;gap:8px;margin-top:14px}
   .licnote{font-size:11.5px;color:var(--ink-soft);margin-top:14px}
   #licbadge{display:none;font-size:11px;padding:3px 10px;border-radius:11px;background:#eef4f8;color:#3a6b8a;border:1px solid #cfe0ea;margin-left:8px}
+  /* ===== スマホ向けレイアウト(≤700px)。PC版は不変 ===== */
+  @media (max-width:700px){
+    header{padding:10px 12px;gap:8px}
+    header h1{font-size:16px;letter-spacing:0;line-height:1.3}
+    header .brand{height:22px}
+    .bar{padding:10px 12px;gap:8px}
+    main{padding:12px}
+    .manual{padding:14px 12px}
+    .mgrid{grid-template-columns:1fr;gap:10px}
+    .fld.wide,.fld.span2{grid-column:auto}
+    .fld select,.fld input,.fld textarea{font-size:16px;padding:10px 10px}  /* 16px=iOSの自動ズーム防止 */
+    .manual .actions{flex-direction:column}
+    .manual .actions .btn{width:100%;padding:12px}
+    .obs .row{grid-template-columns:1fr;gap:2px}
+    .obs .row .k{font-weight:700;color:var(--steel-d)}
+    .pbox{padding:14px;width:96%;max-height:90vh}
+    .grades{gap:8px}
+    .gradefld{flex:1 1 44%}
+    .gradefld select{width:100%}
+    .genqa .gentext{font-size:16px}
+    .hit-top{gap:6px}
+    .matchset{margin-left:0}
+  }
 </style>
 </head>
 <body>
