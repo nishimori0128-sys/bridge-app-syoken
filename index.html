@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<script>
+(function(){
+  var SUPA="https://ffdvnbitndnbqqshidnt.supabase.co", ANON="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZmZHZuYml0bmRuYnFxc2hpZG50Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyOTg3MjIsImV4cCI6MjEwMjg3NDcyMn0.KJDuhYcCevM5k3FUmeCuDOTtVKsfPVDwNI28iwP28RY", SALT="bridge-relay-v1", ITERS=100000, _key=null;
+  function b64e(buf){var b=new Uint8Array(buf),s="";for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s);}
+  function b64d(str){var s=atob(str),b=new Uint8Array(s.length);for(var i=0;i<s.length;i++)b[i]=s.charCodeAt(i);return b;}
+  async function deriveKey(pass){
+    var enc=new TextEncoder();
+    var base=await crypto.subtle.importKey('raw',enc.encode(pass),'PBKDF2',false,['deriveKey']);
+    return await crypto.subtle.deriveKey({name:'PBKDF2',salt:enc.encode(SALT),iterations:ITERS,hash:'SHA-256'},
+      base,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+  }
+  async function enc(obj){
+    var iv=crypto.getRandomValues(new Uint8Array(12));
+    var data=new TextEncoder().encode(JSON.stringify(obj));
+    var ct=await crypto.subtle.encrypt({name:'AES-GCM',iv:iv},_key,data);
+    var out=new Uint8Array(12+ct.byteLength); out.set(iv,0); out.set(new Uint8Array(ct),12);
+    return b64e(out.buffer);
+  }
+  async function dec(b64){
+    var raw=b64d(b64), iv=raw.slice(0,12), ct=raw.slice(12);
+    var pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:iv},_key,ct);
+    return JSON.parse(new TextDecoder().decode(pt));
+  }
+  function sreq(method,path,body,prefer){
+    var h={'apikey':ANON,'Authorization':'Bearer '+ANON,'Content-Type':'application/json'};
+    if(prefer)h['Prefer']=prefer;
+    return fetch(SUPA+'/rest/v1/'+path,{method:method,headers:h,body:body?JSON.stringify(body):undefined})
+      .then(function(r){return r.text().then(function(t){return t?JSON.parse(t):null;});});
+  }
+  function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+  async function callApi(name,args){
+    var req=await enc({name:name,args:args});
+    var ins=await sreq('POST','jobs',{req:req},'return=representation');
+    var id=ins&&ins[0]&&ins[0].id;
+    if(!id) return {ok:false,msg:'リレー投入に失敗しました'};
+    for(var i=0;i<180;i++){
+      await sleep(500);
+      var rows=await sreq('GET','jobs?id=eq.'+id+'&select=res,done');
+      if(rows&&rows[0]&&rows[0].done){
+        var out;
+        try{ out=rows[0].res? await dec(rows[0].res):{ok:false,msg:'空の結果'}; }
+        catch(e){ out={ok:false,msg:'復号に失敗(合言葉不一致の可能性)'}; }
+        try{ sreq('DELETE','jobs?id=eq.'+id); }catch(e){}
+        return out;
+      }
+    }
+    return {ok:false,msg:'応答待ちタイムアウト(PC側が起動中か確認してください)'};
+  }
+  // 前回調書 損傷一覧を画面内オーバーレイ(iframe=checklist.html)で開く
+  function showChk(){
+    var ov=document.getElementById('__chkOverlay');
+    if(!ov){
+      ov=document.createElement('div'); ov.id='__chkOverlay';
+      ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.35);display:flex;flex-direction:column';
+      var bar=document.createElement('div');
+      bar.style.cssText='background:#1f3e54;color:#fff;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-weight:700';
+      var t=document.createElement('span'); t.textContent='前回調書 損傷一覧';
+      var c=document.createElement('button'); c.textContent='閉じる';
+      c.style.cssText='background:#fff;color:#1f3e54;border:none;border-radius:5px;padding:5px 14px;cursor:pointer;font-weight:700';
+      c.onclick=function(){ ov.style.display='none'; };
+      bar.appendChild(t); bar.appendChild(c);
+      var f=document.createElement('iframe'); f.id='__chkFrame';
+      f.style.cssText='flex:1;width:100%;border:none;background:#fff';
+      ov.appendChild(bar); ov.appendChild(f); document.body.appendChild(ov);
+    }
+    ov.style.display='flex';
+    document.getElementById('__chkFrame').src='./checklist.html?ts='+Date.now();
+  }
+  window.__showChecklist=showChk;
+  window.pywebview={api:new Proxy({},{get:function(_,n){return function(){
+    var a=Array.prototype.slice.call(arguments);
+    return callApi(n,a).then(function(res){
+      if((n==='prev_set_bridge'||n==='prev_set_bridge_for') && res && res.ok && !res.multiple){ try{ showChk(); }catch(e){} }
+      return res;
+    });
+  };}})};
+  async function boot(){
+    var pass=localStorage.getItem('relay_pass');
+    if(!pass){ pass=window.prompt('合言葉を入力してください（PC側ワーカーと同じもの）'); if(pass){ localStorage.setItem('relay_pass',pass); } }
+    if(!pass){ document.body.innerHTML='<p style="padding:20px;font-family:sans-serif">合言葉が必要です。ページを再読み込みして入力してください。</p>'; return; }
+    try{ _key=await deriveKey(pass); }catch(e){ alert('鍵の生成に失敗しました'); return; }
+    window.dispatchEvent(new Event('pywebviewready'));
+  }
+  window.addEventListener('DOMContentLoaded', boot);
+})();
+</script>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>橋梁診断　所見参照アプリ（東北支部 R8年度版）</title>
+<style>
+  :root{
+    --ink:#1a2530; --ink-soft:#54616e; --line:#d6dde4; --line-soft:#e8edf1;
+    --bg:#f4f6f8; --panel:#ffffff; --steel:#2d5673; --steel-d:#1f3e54;
+    --accent:#c0532b; --accent-soft:#f6e8e1; --ok:#2f7a52; --ok-soft:#e6f1ea;
+    --warn:#b5862a; --warn-soft:#f7efdc; --shadow:0 1px 3px rgba(20,40,60,.08),0 4px 16px rgba(20,40,60,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Yu Gothic UI","Meiryo",-apple-system,sans-serif;
+    color:var(--ink);background:var(--bg);font-size:14px;line-height:1.6}
+  button,.tag,.m,.pill,.case-head .n,.htag{user-select:none}
+  header{background:var(--steel-d);color:#fff;padding:14px 22px;display:flex;
+    align-items:center;gap:14px;box-shadow:var(--shadow);position:sticky;top:0;z-index:10}
+  header .logo{width:30px;height:30px;border:2px solid #9db8cb;border-radius:4px;
+    display:flex;align-items:center;justify-content:center;font-weight:700;color:#9db8cb}
+  header .brand{height:34px;width:auto;margin-left:auto;display:block}
+  header h1{font-size:24px;margin:0;font-weight:700;letter-spacing:.04em}
+  header .sub{font-size:11px;color:#9db8cb;margin-left:2px}
+  .bar{background:var(--panel);border-bottom:1px solid var(--line);padding:14px 22px;
+    display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .btn{border:1px solid var(--steel);background:var(--steel);color:#fff;
+    padding:9px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;
+    transition:.15s;font-family:inherit}
+  .btn:hover{background:var(--steel-d)}
+  .btn.ghost{background:#fff;color:var(--steel)}
+  .btn.ghost:hover{background:#f0f4f7}
+  .btn.accent{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.accent:hover{filter:brightness(.93)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .status{font-size:12.5px;color:var(--ink-soft)}
+  .status b{color:var(--ink)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px}
+  .pill.ok{background:var(--ok-soft);color:var(--ok)}
+  .pill.warn{background:var(--warn-soft);color:var(--warn)}
+  label.toggle{font-size:12.5px;color:var(--ink-soft);display:flex;align-items:center;gap:6px;cursor:pointer;margin-left:auto}
+  main{padding:22px;max-width:1140px;margin:0 auto}
+  .empty{text-align:center;color:var(--ink-soft);padding:80px 20px}
+  .empty .big{font-size:40px;margin-bottom:14px;opacity:.4}
+  .manual{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:18px 20px;margin-bottom:24px;box-shadow:var(--shadow);display:none}
+  .manual.show{display:block}
+  .manual h3{margin:0 0 14px;font-size:14px;color:var(--steel-d);display:flex;align-items:center;gap:8px}
+  .mgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 16px;margin-bottom:14px}
+  .fld{display:flex;flex-direction:column;gap:4px}
+  .fld label{font-size:11.5px;color:var(--ink-soft);font-weight:600}
+  .fld select,.fld input,.fld textarea{border:1px solid var(--line);border-radius:6px;
+    padding:7px 9px;font-size:13px;font-family:inherit;background:#fcfdfe;color:var(--ink)}
+  .fld textarea{resize:vertical;min-height:54px}
+  .fld.wide{grid-column:1/-1}
+  .fld.span2{grid-column:span 2}
+  .pmodal{position:fixed;inset:0;background:rgba(15,25,35,.55);display:none;align-items:center;justify-content:center;z-index:130}
+  .pmodal.show{display:flex}
+  .pbox{background:#fff;border-radius:12px;box-shadow:0 12px 48px rgba(20,40,60,.3);max-width:820px;width:92%;max-height:86vh;overflow:auto;padding:22px}
+  .pbox h4{margin:0 0 12px;color:var(--steel-d);font-size:15px}
+  .genfield{margin-bottom:14px}
+  .genlab{font-size:12px;font-weight:700;color:var(--steel-d);margin-bottom:6px}
+  .candopt{display:block;border:1px solid var(--line);border-radius:6px;padding:7px 10px;margin-bottom:5px;font-size:12.5px;line-height:1.6;cursor:pointer;background:#fcfdfe}
+  .candopt:hover{border-color:var(--steel);background:#eef4f8}
+  .candopt input{margin-right:7px;vertical-align:middle}
+  .candopt .cs{display:inline-block;font-size:10.5px;font-weight:700;color:var(--accent);margin-right:8px}
+  .gentext,.gendraft{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:12.5px;line-height:1.7;font-family:inherit;resize:vertical;margin-top:5px}
+  .gendraft{background:#fffdf7;line-height:1.8}
+  .grades{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+  .gradefld{display:flex;flex-direction:column;gap:3px}
+  .gradefld label{font-size:10.5px;font-weight:700;color:var(--ink-soft)}
+  .gradefld select{padding:5px 8px;border:1px solid var(--line);border-radius:6px;font-size:12.5px}
+  .combo{font-size:12px;color:var(--ink-soft);margin-top:4px}
+  .prow{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer;background:#fcfdfe;transition:.12s}
+  .prow:hover{border-color:var(--steel);background:#eef4f8}
+  .prow .pk{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+  .prow .pk .m{background:#eef3f6;border-radius:4px;padding:1px 7px;font-size:11px;color:var(--steel)}
+  .prow .kubun{background:var(--accent);color:#fff;border-radius:4px;padding:1px 8px;font-size:11px;font-weight:700}
+  .prow .ps{font-size:12.5px;color:var(--ink)}
+  .floatpanel{position:fixed;right:16px;bottom:16px;width:min(1060px,95vw);max-height:80vh;
+    background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 44px rgba(20,40,60,.4);
+    z-index:95;display:none;flex-direction:column}
+  .floatpanel.show{display:flex}
+  .fp-head{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#fbfcfd,#eef4f8);border-radius:10px 10px 0 0;cursor:move;
+    font-weight:700;color:var(--steel-d);font-size:13px;user-select:none}
+  .fp-filters{display:flex;gap:7px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid var(--line-soft);align-items:center}
+  .fp-filters input,.fp-filters select{border:1px solid var(--line);border-radius:5px;padding:4px 7px;font-size:12px;font-family:inherit;background:#fcfdfe}
+  .fp-filters input{width:96px}
+  .fp-body{overflow:auto;padding:6px 14px 14px}
+  .chktbl{width:100%;border-collapse:collapse;font-size:12px}
+  .chktbl th,.chktbl td{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}
+  .chktbl th{background:#f2f6f9;color:var(--steel-d);font-weight:700;position:sticky;top:0}
+  .chktbl td.c{text-align:center;white-space:nowrap}
+  .chktbl input[type=checkbox]{width:17px;height:17px;cursor:pointer}
+  .chktbl .sh{color:var(--ink-soft);max-width:360px}
+  .chktbl tr:hover td{background:#f7fafc}
+  .btn.mini{padding:4px 9px;font-size:11px}
+  #prevfull{margin:0 0 20px}
+  #prevfull .box{background:#fff8f2;border:1px solid #e8b9a5;border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.7;user-select:text}
+  #prevfull .box .lab{font-size:10.5px;font-weight:700;color:var(--accent);margin-bottom:4px}
+  #prevfull .box .seg{margin-bottom:4px}
+  #prevfull .box .seg .k{font-weight:700;color:var(--ink-soft);margin-right:6px}
+  .mphotos{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;padding:8px;border:1.5px dashed var(--line);border-radius:8px;min-height:80px;transition:.12s}
+  .mphotos.dragover{border-color:var(--steel);background:#eef4f8}
+  .mphotos img{width:80px;height:60px;object-fit:cover;border-radius:5px;border:1px solid var(--line)}
+  .mphotos .add{width:80px;height:60px;border:1.5px dashed var(--line);border-radius:5px;
+    display:flex;align-items:center;justify-content:center;color:var(--ink-soft);cursor:pointer;font-size:22px;background:#fafbfc}
+  .mphotos .add:hover{border-color:var(--steel);color:var(--steel)}
+  .manual .actions{display:flex;gap:10px;flex-wrap:wrap}
+  .case{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:26px;overflow:hidden;box-shadow:var(--shadow)}
+  .case-head{background:linear-gradient(180deg,#fbfcfd,#f2f6f9);padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+  .case-head .n{background:var(--steel);color:#fff;min-width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;padding:0 6px}
+  .case-head .ttl{font-weight:600;font-size:15px}
+  .case-head .form{font-size:11px;color:#fff;background:var(--steel-d);border-radius:4px;padding:1px 8px}
+  .case-head .meta{font-size:11.5px;color:var(--ink-soft);margin-left:auto;text-align:right}
+  .case-body{padding:18px}
+  .obs{display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:14px}
+  .obs .row{display:grid;grid-template-columns:96px 1fr;gap:10px;align-items:start}
+  .obs .k{font-size:11.5px;color:var(--ink-soft);font-weight:600;padding-top:1px}
+  .obs .v{font-size:13px}
+  .tags{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 14px}
+  .tag{background:#eef3f6;border:1px solid var(--line);border-radius:5px;padding:3px 9px;font-size:11.5px;color:var(--steel-d)}
+  .tag.warn{background:var(--warn-soft);border-color:#e8d3a0;color:var(--warn)}
+  .photos{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .photos figure{margin:0;display:flex;flex-direction:column;gap:3px;align-items:center}
+  .photos img{width:140px;height:105px;object-fit:cover;border-radius:6px;border:1px solid var(--line);cursor:pointer;transition:.15s}
+  .photos img:hover{transform:scale(1.02);box-shadow:var(--shadow)}
+  .photos figcaption{font-size:10.5px;color:var(--ink-soft);max-width:140px;text-align:center;line-height:1.3}
+  .hits-head{font-size:12px;font-weight:700;color:var(--steel-d);margin:18px 0 10px;padding-top:14px;border-top:1px dashed var(--line);display:flex;align-items:center;gap:8px}
+  .hits-head .cnt{background:var(--steel);color:#fff;border-radius:20px;padding:1px 8px;font-size:11px}
+  .hit{border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:12px;background:#fcfdfe}
+  .hit.advised{border-left:3px solid var(--accent)}
+  .hit-top{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+  .hit-top .name{font-weight:600;font-size:13px}
+  .score{font-size:11px;color:var(--ink-soft)}
+  .score b{color:var(--steel-d);font-size:13px}
+  .matchset{display:flex;gap:4px;flex-wrap:wrap;margin-left:auto}
+  .m{background:#eef3f6;border-radius:4px;padding:1px 7px;font-size:10.5px;color:var(--steel)}
+  .htags{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}
+  .htag{background:#f0f4f7;border-radius:4px;padding:1px 7px;font-size:11px;color:var(--ink-soft)}
+  .fulltext{background:#fff;border:1px solid var(--line-soft);border-radius:6px;padding:10px 12px;margin:8px 0;font-size:12.5px;line-height:1.7;user-select:text;cursor:text}
+  .fulltext .seg{margin-bottom:5px}
+  .fulltext .seg:last-child{margin-bottom:0}
+  .fulltext .lab{font-size:10.5px;font-weight:700;color:var(--ink-soft);margin-right:6px}
+  .fulltext .genbun{margin-bottom:6px;white-space:pre-wrap}
+  .advice{background:var(--accent-soft);border-radius:6px;padding:11px 13px;margin-top:8px;user-select:text}
+  .advice .lab{font-size:10.5px;font-weight:700;color:var(--accent);margin-bottom:3px;letter-spacing:.04em}
+  .advice .txt{font-size:13px;color:#3a2218;user-select:text}
+  .advice .kind{font-size:11px;color:var(--accent);margin-top:5px;font-weight:600}
+  .noadvice{font-size:12px;color:var(--ok);background:var(--ok-soft);border-radius:6px;padding:8px 12px;margin-top:6px}
+  .hit-photos{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .hit-photos img{width:92px;height:69px;object-fit:cover;border-radius:5px;border:1px solid var(--line);cursor:pointer}
+  .err{background:#fdecea;border:1px solid #f3c4bd;color:#a8341f;padding:12px 16px;border-radius:8px;font-size:13px;margin-bottom:16px;white-space:pre-wrap}
+  #lightbox{position:fixed;inset:0;background:rgba(15,25,35,.88);display:none;align-items:center;justify-content:center;z-index:100;cursor:zoom-out}
+  #lightbox img{max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.5);cursor:default}
+  #lbclose{position:fixed;top:18px;right:24px;z-index:101;background:#fff;color:var(--ink);
+    border:none;border-radius:6px;padding:10px 18px;font-size:14px;font-weight:700;cursor:pointer;
+    box-shadow:0 2px 12px rgba(0,0,0,.45);font-family:inherit}
+  #lbclose:hover{background:#f0f4f7}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #9db8cb;border-top-color:transparent;border-radius:50%;animation:r .7s linear infinite;vertical-align:-2px}
+  @keyframes r{to{transform:rotate(360deg)}}
+  .warmbadge{display:inline-block;font-size:11.5px;padding:4px 12px;border-radius:12px;font-weight:700;margin-top:6px}
+  .warmbadge.warm-loading{background:#fff3e0;color:#b5651d;border:1px solid #e8c39e}
+  .warmbadge.warm-ready{background:#e8f6ec;color:#1f7a3a;border:1px solid #b8e0c4}
+  .warmbadge.warm-hidden{display:none}
+  /* ライセンス認可ゲート(社外版) */
+  .licgate{position:fixed;inset:0;background:rgba(238,242,246,0.98);z-index:99999;display:flex;align-items:center;justify-content:center}
+  .licbox{background:#fff;border:1px solid var(--line);border-radius:12px;padding:26px 30px;max-width:460px;width:90%;box-shadow:0 12px 44px rgba(0,0,0,0.14)}
+  .licbox h3{margin:0 0 12px;font-size:16px}
+  .licmsg{font-size:13px;color:var(--ink);margin-bottom:14px;line-height:1.75;min-height:1.6em}
+  .lickey{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:14px;letter-spacing:0.5px}
+  .licbtns{display:flex;gap:8px;margin-top:14px}
+  .licnote{font-size:11.5px;color:var(--ink-soft);margin-top:14px}
+  #licbadge{display:none;font-size:11px;padding:3px 10px;border-radius:11px;background:#eef4f8;color:#3a6b8a;border:1px solid #cfe0ea;margin-left:8px}
+</style>
+</head>
+<body>
+<!-- ライセンス認可ゲート(社外版のみ表示。社内版では常に非表示) -->
+<div id="licenseGate" class="licgate" style="display:none">
+  <div class="licbox">
+    <h3>ライセンス認証</h3>
+    <div id="licMsg" class="licmsg"></div>
+    <input id="licKey" class="lickey" placeholder="ライセンスキーを入力" autocomplete="off" spellcheck="false"
+           onkeydown="if(event.key==='Enter'){licSubmit();}">
+    <div class="licbtns">
+      <button class="btn accent" onclick="licSubmit()">認証</button>
+      <button class="btn ghost" onclick="licRetry()">再確認</button>
+    </div>
+    <div class="licnote">ご不明な場合は管理者にお問い合わせください。</div>
+  </div>
+</div>
+<header>
+  <div>
+    <h1>橋梁診断　所見参照アプリ（東北支部 R8年度版）</h1>
+    <span id="warmbadge" class="warmbadge warm-loading">検索エンジン準備中…（初回の検索が遅くなります）</span>
+    <span id="licbadge"></span>
+  </div>
+  <img class="brand" src="data:image/png;base64,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" alt="JBEC">
+</header>
+
+<div class="bar">
+  <span class="status" id="status">同梱の教師データを準備しています…</span>
+</div>
+
+<main>
+  <div id="err"></div>
+  <div class="manual show" id="manualPanel">
+    <h3>⌨ 項目を記載して類似所見を検索</h3>
+    <div class="mgrid" style="margin-bottom:10px;align-items:end">
+      <div class="fld"><label>橋梁名（前回点検調書から取得）</label><input type="text" id="f_橋梁名" placeholder="例：中沢川橋（上）＝（上り）"></div>
+      <div class="fld"><label>径間（例：1 / 1-1）</label><input type="text" id="f_径間" placeholder="例：1"></div>
+      <div class="fld"><label>&nbsp;</label>
+        <button class="btn" onclick="setBridge()" style="width:100%;padding:11px 6px;font-weight:700">橋梁名をセットして損傷一覧を表示</button>
+      </div>
+    </div>
+    <div class="mgrid">
+      <div class="fld"><label>構成要素</label><select id="f_構成要素"></select></div>
+      <div class="fld"><label>部材</label><select id="f_部材"></select></div>
+      <div class="fld"><label>損傷種類</label><select id="f_損傷種類"></select></div>
+      <div class="fld"><label>構造形式（自由記載・上部構造のとき有効）</label><input type="text" id="f_構造形式" placeholder="例：鈑桁橋 / 連続非合成鈑桁 など（類似で一致）"></div>
+      <div class="fld"><label>管轄出張所</label><select id="f_管轄出張所"></select></div>
+      <div class="fld"><label>橋梁診断員名称</label><select id="f_橋梁診断員名称"></select></div>
+      <div class="fld"><label>耐荷性能評価</label><select id="f_耐荷性能評価"></select></div>
+      <div class="fld span2"><label>措置の必要性</label><select id="f_措置の必要性"></select></div>
+      <div class="fld wide"><label>損傷の状態</label>
+        <textarea id="f_損傷の状態" placeholder="例：左側張出し床版の底鋼板に断面減少を伴う腐食が見られる"></textarea></div>
+      <div class="fld wide"><label>損傷の原因（任意）</label>
+        <textarea id="f_損傷の原因" placeholder="例：地覆側面と鋼板の隙間から雨水が浸入した影響"></textarea></div>
+    </div>
+    <div class="fld" style="margin-bottom:4px"><label>損傷写真（ドラッグ&ドロップ / ＋ で追加 / スクリーンショットは Ctrl+V で貼り付け。写真だけ／項目併用で画像検索）</label></div>
+    <div class="mphotos" id="mphotos">
+      <div class="add" onclick="addManualPhoto()" title="損傷写真を追加">＋</div>
+    </div>
+    <div class="actions">
+      <button class="btn accent" onclick="runManual()">この内容で類似所見を検索</button>
+      <button class="btn ghost" onclick="clearManual()">写真をクリア</button>
+      <button class="btn ghost" onclick="clearAll()">全てクリア</button>
+      <button class="btn accent" style="margin-left:auto" onclick="openGen()">この内容で所見例を生成</button>
+    </div>
+  </div>
+  <div id="prevfull"></div>
+  <div id="results">
+    <div class="empty">
+      <div class="big">⌖</div>
+      <div>上の項目を記載して検索すると<br>類似する過去の所見がここに表示されます。</div>
+    </div>
+  </div>
+</main>
+
+<input type="file" id="filepick" accept="image/*" multiple style="display:none">
+<div id="lightbox" onclick="this.style.display='none'">
+  <button id="lbclose" onclick="event.stopPropagation();document.getElementById('lightbox').style.display='none'">✕ 閉じる</button>
+  <img id="lbimg" onclick="event.stopPropagation()">
+</div>
+<div id="prevModal" class="pmodal"><div class="pbox"><div id="prevModalBody"></div>
+  <div style="text-align:right;margin-top:12px"><button class="btn ghost" onclick="closePrev()">閉じる</button></div>
+</div></div>
+<div id="genModal" class="pmodal"><div class="pbox" style="max-width:920px"><div id="genBody"></div></div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let manualImages = [];
+let manualKeys = [];   // manualImagesと平行。前回調書写真は事前計算ベクトルのキー、手貼りはnull
+let optionsLoaded = false;
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function showErr(m){$('#err').innerHTML = m? `<div class="err">${esc(m)}</div>`:'';}
+function lb(src){$('#lbimg').src=src;$('#lightbox').style.display='flex';}
+
+window.addEventListener('pywebviewready', async ()=>{
+  // 社外版はライセンス認可を通ってから本体起動。社内版はゲートを素通り。
+  const ok = await checkLicenseGate();
+  if(ok){ await bootApp(); }
+  startLicenseWatch();   // 定期再確認(失効/キルスイッチ反映)
+});
+async function bootApp(){
+  if(window._booted) return; window._booted=true;
+  try{
+    const r = await window.pywebview.api.startup();
+    if(r && r.ok && r.bundled){
+      onTeacherLoaded({path:'(同梱データ)', count:r.count, photo_dir:r.photo_dir});
+      await loadOptions();
+      // 直前にセットしていた橋梁を継続表示(再起動後の作業継続)
+      try{ const lb=await window.pywebview.api.prev_last_bridge(); if(lb && lb.has && lb.bridge_name){ const el=$('#f_橋梁名'); if(el) el.value=lb.bridge_name; } }catch(e){}
+    } else if(r && !r.ok){ showErr(r.msg||'初期化に失敗しました'); }
+  }catch(e){}
+  startWarmWatch();   // 検索エンジン(モデル)のウォームアップ状態を監視
+}
+
+// ===== ライセンス認可ゲート(社外版のみ) =====
+async function checkLicenseGate(){
+  let s;
+  try{ s = await window.pywebview.api.license_status(); }catch(e){ return true; }
+  if(!s || s.external===false){ hideGate(); return true; }   // 社内版=素通り
+  if(s.ok){ hideGate(); showLicBadge(s); return true; }
+  showGate(s);
+  return false;
+}
+function licReasonMsg(s){
+  const exp = s.expires_at ? ('（期限: '+String(s.expires_at).slice(0,10)+'）') : '';
+  const m = {
+    no_key:'ライセンスキーを入力して「認証」を押してください。',
+    invalid_key:'ライセンスキーが正しくありません。再度ご確認ください。',
+    expired:'ライセンスの期限が切れています。'+exp+'管理者にご連絡ください。',
+    disabled:'このライセンスは現在停止されています。管理者にご連絡ください。',
+    seat_limit:'登録できる台数の上限に達しています。管理者にご連絡ください。',
+    device_revoked:'この端末は利用が無効化されています。管理者にご連絡ください。',
+    network:'認証サーバーに接続できません。インターネット接続をご確認のうえ再試行してください。'
+  };
+  return esc(m[s.reason] || ('認証できませんでした（'+(s.reason||'不明')+'）。'));
+}
+function showGate(s){
+  const g=$('#licenseGate'); if(!g) return;
+  g.style.display='flex';
+  $('#licMsg').innerHTML = licReasonMsg(s||{});
+}
+function hideGate(){ const g=$('#licenseGate'); if(g) g.style.display='none'; }
+function showLicBadge(s){
+  const b=$('#licbadge'); if(!b) return;
+  if(s && s.expires_at){ b.textContent='ライセンス有効（期限 '+String(s.expires_at).slice(0,10)+'）'; b.style.display='inline-block'; }
+}
+async function licSubmit(){
+  const k=($('#licKey').value||'').trim(); if(!k){ $('#licMsg').textContent='キーを入力してください。'; return; }
+  $('#licMsg').textContent='確認中...';
+  let s; try{ s=await window.pywebview.api.license_set_key(k); }catch(e){ s={external:true,ok:false,reason:'network'}; }
+  if(s.ok){ hideGate(); showLicBadge(s); await bootApp(); } else { showGate(s); }
+}
+async function licRetry(){
+  $('#licMsg').textContent='確認中...';
+  let s; try{ s=await window.pywebview.api.license_status(); }catch(e){ s={external:true,ok:false,reason:'network'}; }
+  if(s.external===false || s.ok){ hideGate(); if(s.ok) showLicBadge(s); await bootApp(); } else { showGate(s); }
+}
+function startLicenseWatch(){
+  setInterval(async ()=>{
+    let s; try{ s=await window.pywebview.api.license_status(); }catch(e){ return; }
+    if(s && s.external && !s.ok){ showGate(s); }   // 動作中に失効/停止したらロック
+  }, 30*60*1000);
+}
+
+// ===== 検索エンジン(モデル)のウォームアップ表示 =====
+// 初回のモデル読込(テキスト/画像で各10秒級)を起動直後に裏で実施。完了までバッジで通知。
+let _warmReady=false;
+function onWarmReady(){ _warmReady=true; const b=$('#warmbadge'); if(b){ b.textContent='検索準備 完了'; b.className='warmbadge warm-ready'; setTimeout(()=>{ b.className='warmbadge warm-hidden'; }, 4000); } }
+async function startWarmWatch(){
+  try{ const s=await window.pywebview.api.warm_status(); if(s&&s.warm){ onWarmReady(); return; } }catch(e){}
+  // Python からの onWarmReady 通知が主。取りこぼし対策で数秒ごとにポーリング(最大~3分)。
+  let n=0; const iv=setInterval(async ()=>{
+    n++; if(_warmReady||n>60){ clearInterval(iv); return; }
+    try{ const s=await window.pywebview.api.warm_status(); if(s&&s.warm){ clearInterval(iv); onWarmReady(); } }catch(e){}
+  }, 3000);
+}
+
+function onTeacherLoaded(r){
+  let ph = r.photo_dir ? '<span class="pill ok">写真フォルダ検出</span>' : '<span class="pill warn">写真フォルダ未検出</span>';
+  $('#status').innerHTML = `教師データ <b>${esc(r.path)}</b>：${r.count} 所見 ${ph}`;
+}
+
+function fillSelect(sel, values, keepValue){
+  const cur = keepValue ? sel.value : '';
+  sel.innerHTML='<option value="">（指定なし）</option>';
+  (values||[]).forEach(v=>{const op=document.createElement('option');op.value=v;op.textContent=v;sel.appendChild(op);});
+  sel.value = (cur && (values||[]).includes(cur)) ? cur : '';
+}
+function updateMemberOptions(){
+  const o = window._fieldOpts || {};
+  const k = $('#f_構成要素').value;
+  const map = o['部材_by_構成要素'] || {};
+  const list = (k && map[k]) ? map[k] : (o['部材']||[]);   // 構成要素未選択なら全部材
+  fillSelect($('#f_部材'), list, true);
+}
+async function loadOptions(){
+  if(optionsLoaded) return;
+  const o = await window.pywebview.api.field_options();
+  window._fieldOpts = o;
+  for(const key of ['構成要素','損傷種類','管轄出張所','橋梁診断員名称','耐荷性能評価','措置の必要性']){
+    fillSelect($('#f_'+key), o[key], false);
+  }
+  updateMemberOptions();                                    // 部材は構成要素で絞り込む
+  $('#f_構成要素').addEventListener('change', updateMemberOptions);
+  optionsLoaded=true;
+}
+
+function addManualPhoto(){ $('#filepick').click(); }
+function addImageFiles(files){
+  [...files].forEach(file=>{
+    if(file.type && !file.type.startsWith('image/')) return;
+    const rd=new FileReader(); rd.onload=()=>{ manualImages.push(rd.result); manualKeys.push(null); renderManualPhotos(); }; rd.readAsDataURL(file);
+  });
+}
+$('#filepick').addEventListener('change', e=>{ addImageFiles(e.target.files); e.target.value=''; });
+(function(){
+  const dz=$('#mphotos'); if(!dz) return;
+  ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev, e=>{ e.preventDefault(); e.stopPropagation(); dz.classList.add('dragover'); }));
+  ['dragleave','dragend'].forEach(ev=>dz.addEventListener(ev, e=>{ e.preventDefault(); e.stopPropagation(); dz.classList.remove('dragover'); }));
+  dz.addEventListener('drop', e=>{ e.preventDefault(); e.stopPropagation(); dz.classList.remove('dragover'); if(e.dataTransfer&&e.dataTransfer.files) addImageFiles(e.dataTransfer.files); });
+  ['dragover','drop'].forEach(ev=>window.addEventListener(ev, e=>{ e.preventDefault(); }));
+})();
+// スクリーンショット等のクリップボード画像を Ctrl+V で貼り付け
+window.addEventListener('paste', e=>{
+  const items = (e.clipboardData && e.clipboardData.items) ? e.clipboardData.items : [];
+  let added=false;
+  for(const it of items){
+    if(it.type && it.type.startsWith('image/')){
+      const f=it.getAsFile();
+      if(f){ const rd=new FileReader(); rd.onload=()=>{ manualImages.push(rd.result); manualKeys.push(null); renderManualPhotos(); }; rd.readAsDataURL(f); added=true; }
+    }
+  }
+  if(added) e.preventDefault();
+});
+// 状態/原因を手入力し始めたら、前回調書から転写した所見(全文)の表示を消す。
+// 転写は .value= で入れるため input イベントは出ず、転写直後は消えない(手入力時のみ消える)。
+['f_損傷の状態','f_損傷の原因'].forEach(id=>{
+  const e=$('#'+id);
+  if(e) e.addEventListener('input', ()=>{ const p=$('#prevfull'); if(p) p.innerHTML=''; });
+});
+function renderManualPhotos(){
+  const box=$('#mphotos'); box.querySelectorAll('img').forEach(n=>n.remove());
+  const add=box.querySelector('.add');
+  manualImages.forEach((src)=>{ const im=document.createElement('img'); im.src=src; im.onclick=()=>lb(src); box.insertBefore(im, add); });
+}
+function clearManual(){
+  // クリアは写真のみ(入力項目は残す)
+  manualImages=[]; manualKeys=[]; renderManualPhotos();
+}
+function clearAll(){
+  // 全ての入力項目・写真・前回調書から転写した所見(全文)を消す
+  ['f_橋梁名','f_径間','f_構造形式','f_損傷の状態','f_損傷の原因',
+   'f_構成要素','f_部材','f_損傷種類','f_管轄出張所','f_橋梁診断員名称',
+   'f_耐荷性能評価','f_措置の必要性'].forEach(id=>{ const e=$('#'+id); if(e) e.value=''; });
+  updateMemberOptions();                 // 構成要素クリアに合わせ部材候補を全件へ
+  manualImages=[]; manualKeys=[]; renderManualPhotos();
+  window._r3prog=''; window._genInput=null; window._genStruct=null;
+  $('#prevfull').innerHTML='';            // 前回所見(全文)も消す
+  $('#status').textContent='入力内容をクリアしました。';
+}
+
+async function runManual(){
+  showErr('');
+  const msg = _warmReady ? '検索中...' : '検索中...（初回はモデル準備のため時間がかかります）';
+  $('#status').innerHTML='<span class="spin"></span> '+msg;
+  const payload={
+    構成要素:$('#f_構成要素').value, 部材:$('#f_部材').value, 損傷種類:$('#f_損傷種類').value,
+    構造形式:$('#f_構造形式').value, 管轄出張所:$('#f_管轄出張所').value,
+    橋梁診断員名称:$('#f_橋梁診断員名称').value,
+    耐荷性能評価:$('#f_耐荷性能評価').value, 措置の必要性:$('#f_措置の必要性').value,
+    損傷の状態:$('#f_損傷の状態').value, 損傷の原因:$('#f_損傷の原因').value, 見出し:'(手動入力)',
+    進行性:(window._r3prog||''),   // 前回調書転記時の進行性を内部的に類似度へ加点(画面に入力欄は無い)
+    images:manualImages, prev_vec_keys:manualKeys
+  };
+  const r=await window.pywebview.api.check_manual(payload);
+  if(!r.ok){ showErr(r.msg||'検索失敗'); $('#status').textContent='失敗'; return; }
+  $('#status').innerHTML='手動入力の内容で検索しました';
+  render(r.cases);
+}
+
+// ===== 前回点検調書から所見を取得 =====
+let prevPath=null;
+function closePrev(){ $('#prevModal').classList.remove('show'); }
+async function prevLookup(){
+  const bridge=$('#f_橋梁名').value.trim();
+  if(!bridge){ showErr('橋梁名を入力してください'); return; }
+  showErr(''); $('#status').innerHTML='<span class="spin"></span> 前回調書を検索中...';
+  const keikan=$('#f_径間').value.trim(), member=$('#f_部材').value;
+  const r=await window.pywebview.api.prev_search(bridge, keikan, member);
+  if(!r.ok){ showErr(r.msg||'取得失敗'); $('#status').textContent=''; return; }
+  if(r.multiple){ showCandidates(r.candidates, keikan, member, r.partial); return; }
+  showRecords(r);
+}
+function showCandidates(cands, keikan, member, partial){
+  window._prevCands=cands; window._prevKeikan=keikan; window._prevMember=member;
+  const head = partial
+    ? '<h4>該当する橋梁が見つかりませんでした。名称を含む橋梁から選択してください。</h4>'
+    : '<h4>複数の橋梁が存在します。対象を選択してください。</h4>';
+  $('#prevModalBody').innerHTML=head+
+    cands.map((c,i)=>`<div class="prow" onclick="pickCandidate(${i})">
+      <div class="pk"><span class="m">橋梁</span>${esc(c['橋梁名'])}<span class="m">出張所</span>${esc(c['出張所'])||'(不明)'}</div>
+      <div class="ps">${esc(c.filename)}</div></div>`).join('');
+  $('#status').textContent=''; $('#prevModal').classList.add('show');
+}
+async function pickCandidate(i){
+  const c=window._prevCands[i];
+  if(window._setDisamb){ window._setDisamb=false; closePrev(); return setBridgeFor(c.path); }
+  $('#status').innerHTML='<span class="spin"></span> 所見を抽出中...';
+  const r=await window.pywebview.api.prev_records_for(c.path, window._prevKeikan, window._prevMember);
+  if(!r.ok){ showErr(r.msg); closePrev(); $('#status').textContent=''; return; }
+  showRecords(r);
+}
+function showRecords(r){
+  prevPath=r.path; window._prevRecords=r.records;
+  let head=`<h4>前回調書の所見（${esc(r.source)}）から1つ選択してください。</h4>`;
+  if(r.only_b) head+='<div style="color:#b5862a;font-size:12.5px;margin-bottom:8px">対策区分B以下の損傷のみでした。代表損傷を記載します。</div>';
+  $('#prevModalBody').innerHTML=head+r.records.map((rec,i)=>`<div class="prow" onclick="pickRecord(${i})">
+     <div class="pk"><span class="kubun">${esc(rec['対策区分'])}</span><span class="m">径間${esc(rec['径間'])}</span><span class="m">${esc(rec['部材'])}</span><span class="m">${esc(rec['損傷種類'])}</span>${(rec['写真番号']||[]).length?`<span class="m">写真${rec['写真番号'].join(',')}</span>`:''}</div>
+     <div class="ps">${esc((rec['状態']||'').slice(0,72))}</div></div>`).join('');
+  $('#status').textContent=''; $('#prevModal').classList.add('show');
+}
+function pickRecord(i){ transcribeRecord(window._prevRecords[i], prevPath); closePrev(); }
+
+// 転記のたびに直前の項目・写真をクリア(径間/構成要素/部材/損傷種類/構造形式/性能評価/措置の必要性/写真)
+function clearForTranscribe(){
+  ['f_径間','f_構造形式','f_構成要素','f_部材','f_損傷種類','f_耐荷性能評価','f_措置の必要性']
+    .forEach(id=>{ const e=$('#'+id); if(e) e.value=''; });
+  updateMemberOptions();                 // 構成要素クリアに合わせ部材候補を全件へ
+  manualImages=[]; manualKeys=[]; renderManualPhotos();  // 直前の写真を消す(残存対策)
+  $('#prevfull').innerHTML='';
+}
+// 部材名を転記(選択肢に一致するものへ。無ければ部分一致で保険)
+function setMemberValue(name){
+  const s=$('#f_部材'); if(!s||!name) return;
+  const opts=[...s.options].map(o=>o.value);
+  if(opts.includes(name)){ s.value=name; return; }
+  const hit=opts.find(o=>o && (name.includes(o)||o.includes(name)));
+  s.value=hit||'';
+}
+
+// 所見を手動欄へ転記(状態/原因/損傷種類/部材名)＋全文表示＋その10写真添付＋検索
+async function transcribeRecord(rec, path){
+  clearForTranscribe();                                    // ← 先に直前分をクリア
+  window._r3prog = rec['進行性']||'';                       // 所見例生成の進行性候補に使う
+  $('#f_損傷の状態').value=rec['状態']||''; $('#f_損傷の原因').value=rec['原因']||'';
+  if(rec['損傷種類']){ const s=$('#f_損傷種類'); s.value=rec['損傷種類']; }  // 選択肢に無ければ空のまま
+  if(rec['部材']){ setMemberValue(rec['部材']); }          // 部材名も転記
+  const seg=(k,v)=> v?`<div class="seg"><span class="k">${k}</span>${esc(v)}</div>`:'';
+  $('#prevfull').innerHTML=`<div class="box"><div class="lab">前回調書から転写した所見（全文）</div>
+     ${seg('状態',rec['状態'])}${seg('原因',rec['原因'])}${seg('進行性',rec['進行性'])}
+     <div class="seg"><span class="k">区分</span>${esc(rec['対策区分'])}／径間${esc(rec['径間'])}／${esc(rec['部材'])}${rec['部材番号']?'（'+esc(rec['部材番号'])+'）':''}／${esc(rec['損傷種類'])}</div></div>`;
+  if((rec['写真番号']||[]).length && path){
+    $('#status').innerHTML='<span class="spin"></span> 損傷写真を取得中...';
+    const pr=await window.pywebview.api.prev_photos(path, rec['写真番号']);
+    if(pr.ok && pr.images){ pr.images.forEach((s,ix)=>{ manualImages.push(s); manualKeys.push((pr.keys&&pr.keys[ix])||null); }); renderManualPhotos(); }
+  }
+  // 転記はここまで(検索はしない)。検索は「この内容で類似所見を検索」ボタンで実行する。
+  $('#status').textContent='転記しました。内容を確認し「検索」ボタンで類似所見を検索してください。';
+}
+
+// ===== 橋梁名をセット（対策区分≠Bの一覧を「別ウィンドウ」で表示。本体の外に配置可） =====
+async function setBridge(){
+  const bridge=$('#f_橋梁名').value.trim();
+  if(!bridge){ showErr('橋梁名を入力してください'); return; }
+  showErr(''); $('#status').innerHTML='<span class="spin"></span> 橋梁をセット中...';
+  const r=await window.pywebview.api.prev_set_bridge(bridge);
+  if(!r.ok){ showErr(r.msg||'セット失敗'); $('#status').textContent=''; return; }
+  if(r.multiple){ window._setDisamb=true; showCandidates(r.candidates,'','',r.partial); return; }
+  if(r.bridge_name) $('#f_橋梁名').value=r.bridge_name;
+  $('#status').innerHTML=`橋梁をセットしました（別ウィンドウで一覧表示・${r.count}件）`;
+}
+async function setBridgeFor(path){
+  $('#status').innerHTML='<span class="spin"></span> 所見を抽出中...';
+  const r=await window.pywebview.api.prev_set_bridge_for(path);
+  if(!r.ok){ showErr(r.msg); return; }
+  if(r.bridge_name) $('#f_橋梁名').value=r.bridge_name;
+  $('#status').innerHTML=`橋梁をセットしました（別ウィンドウで一覧表示・${r.count}件）`;
+}
+// チェックリスト(別ウィンドウ)の転記ボタンから呼ばれる(Python経由)
+function transcribeFromChecklist(rec, path){ transcribeRecord(rec, path); }
+
+// ヒットの所見は原文(◇見出し・改行・「・」箇条書きを保持)を省略なく表示し、続けて評価を出す。
+// 原文はPDF由来の途中改行(◇/・/【で始まらない行)を直前行へ連結して整形する。
+function fullText(h){
+  const seg=(lab,v)=> v? `<div class="seg"><span class="lab">${lab}</span>${esc(v)}</div>`:'';
+  const grade=(lab,g,v)=> (g||v)? `<div class="seg"><span class="lab">${lab}${g?'：'+esc(g):''}</span>${esc(v||'')}</div>`:'';
+  if(h['原文']){
+    // 原文(◇見出し・「・」箇条書き)の途中改行(◇/・/【で始まらない行)を直前行へ連結
+    const lines=[];
+    String(h['原文']).split('\n').forEach(l=>{
+      if(!lines.length || /^\s*[◇◆・･【]/.test(l)) lines.push(l); else lines[lines.length-1]+=l;
+    });
+    // 評価・措置を【】付きで続ける(原文の形式のままコピペできるように)
+    const taika=h['耐荷性能評価'];
+    if(taika || h['評価内容']){ lines.push('【耐荷性能の評価'+(taika?'：'+taika:'')+'】'); if(h['評価内容']) lines.push(h['評価内容']); }
+    if(h['耐久性能評価']){ lines.push('【耐久性能の評価】'); lines.push(h['耐久性能評価']); }
+    const sochi=h['措置の必要性'];
+    if(sochi || h['措置の内容']){ lines.push('【措置の必要性'+(sochi?'：'+sochi:'')+'】'); if(h['措置の内容']) lines.push(h['措置の内容']); }
+    const genbun = lines.map(l=>esc(l)).join('\n');   // 実改行(pre-wrap)でコピペ整合
+    return `<div class="fulltext"><div class="genbun">${genbun}</div></div>`;
+  }
+  // 原文が無い場合(手動入力等)は分割表示にフォールバック
+  const evals = grade('耐荷性能の評価',h['耐荷性能評価'],h['評価内容'])
+              + seg('耐久性能の評価',h['耐久性能評価'])
+              + grade('措置の必要性',h['措置の必要性'],h['措置の内容']);
+  const body = seg('状態',h['状態'])+seg('原因',h['原因'])+seg('進行性',h['進行性'])+evals;
+  return body? `<div class="fulltext">${body}</div>`:'';
+}
+
+function render(cases){
+  const root = $('#results');
+  if(!cases.length){ root.innerHTML='<div class="empty">所見が抽出できませんでした。</div>'; return; }
+  root.innerHTML = cases.map(co => {
+    const c = co.case;
+    const photos = (c.images||[]).map(s=>`<figure><img src="${s}" onclick="lb('${s}')">${c['キャプション']?`<figcaption>${esc(c['キャプション'])}</figcaption>`:''}</figure>`).join('');
+    const tags = [
+      c['構成要素'] && `<span class="tag">構成要素：${esc(c['構成要素'])}</span>`,
+      c['部材'] && `<span class="tag">部材：${esc(c['部材'])}</span>`,
+      c['損傷種類'] && `<span class="tag">損傷：${esc(c['損傷種類'])}</span>`,
+      c['耐荷性能評価'] && `<span class="tag">耐荷：${esc(c['耐荷性能評価'])}</span>`,
+      c['措置の必要性'] && `<span class="tag">措置：${esc(c['措置の必要性'])}</span>`
+    ].filter(Boolean).join('');
+    const hits = (co.hits||[]).map(h=>{
+      const hp = (h.images||[]).slice(0,4).map(s=>`<img src="${s}" onclick="lb('${s}')">`).join('');
+      const ms = (h.matched||[]).map(m=>`<span class="m">${esc(m)}</span>`).join('');
+      const htags=[
+        h['様式番号']&&`<span class="htag">${esc(h['様式番号'])}</span>`,
+        h['構成要素']&&`<span class="htag">構成:${esc(h['構成要素'])}</span>`,
+        h['部材']&&`<span class="htag">部材:${esc(h['部材'])}</span>`,
+        h['損傷種類']&&`<span class="htag">損傷:${esc(h['損傷種類'])}</span>`,
+        h['構造形式']&&`<span class="htag">${esc(h['構造形式'])}</span>`,
+        h['診断員']&&`<span class="htag">診断員:${esc(h['診断員'])}</span>`,
+        (h.sim_state!=null)&&`<span class="htag">状態類似 ${h.sim_state}</span>`,
+        (h.img_sim!=null)&&`<span class="htag" style="background:#e3edf4;color:#2d5673;font-weight:600">写真類似 ${h.img_sim}</span>`
+      ].filter(Boolean).join('');
+      return `<div class="hit">
+        <div class="hit-top">
+          <span class="name">${esc(h['ファイル名'])}・${esc(h['見出し'])||''}</span>
+          <span class="score">類似度 <b>${h.score}</b></span>
+          <span class="matchset">${ms}</span>
+        </div>
+        <div class="htags">${htags}</div>
+        ${fullText(h)}
+        ${hp?`<div class="hit-photos">${hp}</div>`:''}
+      </div>`;
+    }).join('') || '<div class="noadvice">類似する過去所見は見つかりませんでした。</div>';
+    return `<div class="case">
+      <div class="case-head">
+        <div class="n">${esc(c['所見番号'])}</div>
+        ${c['様式番号']?`<div class="form">${esc(c['様式番号'])}</div>`:''}
+        <div class="ttl">${esc(c['見出し'])||'(見出しなし)'}</div>
+        <div class="meta">${esc(c['出張所'])||''}<br>${esc(c['構造形式'])||''}</div>
+      </div>
+      <div class="case-body">
+        ${fullText(c)}
+        <div class="tags">${tags}</div>
+        ${photos?`<div class="photos">${photos}</div>`:''}
+        <div class="hits-head">類似する過去所見 <span class="cnt">${(co.hits||[]).length}</span></div>
+        ${hits}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ===== 所見例の生成(QA→編集可能ドラフト) =====
+function closeGen(){ $('#genModal').classList.remove('show'); }
+function genInput(){
+  // 主検索(check_manual)と同じメタ項目を渡し、生成ボタンの検索結果を主検索と一致させる
+  return {構成要素:$('#f_構成要素').value, 部材:$('#f_部材').value, 損傷種類:$('#f_損傷種類').value,
+    構造形式:$('#f_構造形式').value, 管轄出張所:$('#f_管轄出張所').value,
+    橋梁診断員名称:$('#f_橋梁診断員名称').value,
+    耐荷性能評価:$('#f_耐荷性能評価').value, 措置の必要性:$('#f_措置の必要性').value,
+    状態:$('#f_損傷の状態').value, 原因:$('#f_損傷の原因').value, 進行性:(window._r3prog||''),
+    images:manualImages, prev_vec_keys:manualKeys};   // 写真ありなら画像類似も使って検索→生成
+}
+async function openGen(){
+  // 押すたびに、その時点の入力値で必ず再検索して生成する
+  window._genInput=genInput();
+  $('#status').innerHTML='<span class="spin"></span> 類似所見を検索して所見例を生成中...';
+  const r=await window.pywebview.api.generate_shoken(window._genInput);
+  $('#status').textContent='';
+  if(!r.ok){ showErr(r.msg||'生成失敗'); return; }
+  window._gen=r;
+  window._genStruct={部材:window._genInput.部材||'', 損傷種類:window._genInput.損傷種類||''};
+  renderGen(r);
+  $('#genModal').classList.add('show');
+}
+const CAND_LABEL={状態:'損傷の状態',原因:'損傷の原因',進行性:'損傷の進行性',
+  耐荷評価:'耐荷性能の評価',耐久評価:'耐久性能の評価',措置内容:'措置の内容'};
+function candRadios(field){
+  const cs=(window._gen.candidates&&window._gen.candidates[field])||[];
+  const name='cand_'+field;
+  const opts=cs.map((c,i)=>`<label class="candopt"><input type="radio" name="${name}" value="${i}" ${i===0?'checked':''} onchange="onCandPick('${field}',${i})"><span class="cs">${esc(c.source)}</span>${esc(c.text)}</label>`).join('');
+  const cur=cs.length?cs[0].text:'';
+  const rows=(field==='進行性')?2:3;
+  return `<div class="genfield"><div class="genlab">${CAND_LABEL[field]||field}</div>${opts}
+    <textarea id="gen_${field}" class="gentext" rows="${rows}">${esc(cur)}</textarea></div>`;
+}
+function onCandPick(field,i){
+  const cs=window._gen.candidates[field]||[];
+  if(cs[i]) $('#gen_'+field).value=cs[i].text;
+}
+const GRADE_OPTS={耐荷:['Ａ','Ｂ','Ｃ','対象外'],耐久:['有','無'],第三者:['有','無'],
+  措置:['無','有','有（Ｍ）','有（Ｓ２）','有（Ｓ１）'],健全性:['Ⅰ相当','Ⅱ相当','Ⅲ相当']};
+function gradeSelect(k){
+  const g=window._gen.grades||{}; const cur=g[k]||'';
+  const opts=(GRADE_OPTS[k]||[]).map(v=>`<option ${v===cur?'selected':''}>${v}</option>`).join('');
+  return `<div class="gradefld"><label>${k}</label><select id="grade_${k}">${opts}</select></div>`;
+}
+function renderGen(r){
+  const combo=r.template?r.template.combo:'(該当なし)';
+  const exact=r.grades_exact?'':' <span style="color:#b5862a">※近いテンプレを使用</span>';
+  const inp=window._genInput||{};
+  // 部材・損傷種類は本体入力のプルダウン選択肢を流用(耐荷の左に置く)
+  const buzaiSel=`<div class="gradefld"><label>部材</label><select id="gen_部材">${$('#f_部材').innerHTML}</select></div>`;
+  const sonshoSel=`<div class="gradefld"><label>損傷種類</label><select id="gen_損傷種類">${$('#f_損傷種類').innerHTML}</select></div>`;
+  $('#genBody').innerHTML=`
+    <h4>所見例の生成</h4>
+    <div class="genfield"><div class="genlab">部材・損傷種類・性能評価・区分（推定値　修正可）</div>
+      <div class="grades">${buzaiSel}${sonshoSel}${['耐荷','耐久','第三者','措置','健全性'].map(gradeSelect).join('')}</div>
+      <div class="combo">照合テンプレ：<b id="genCombo">${esc(combo)}</b>${exact}</div>
+    </div>
+    <div class="genlab">所見ドラフト（自由に編集できます）</div>
+    <textarea id="genDraft" class="gendraft" rows="16">${esc(r.draft||'')}</textarea>
+    <div style="display:flex;gap:8px;margin:10px 0 16px">
+      <button class="btn accent" onclick="updateDraft()">ドラフトを更新</button>
+      <button class="btn accent" onclick="copyDraft()">クリップボードにコピー</button>
+      <button class="btn ghost" onclick="closeGen()">閉じる</button>
+    </div>
+    <div class="genqa">
+      ${candRadios('状態')}
+      ${candRadios('原因')}
+      ${candRadios('進行性')}
+      ${candRadios('耐荷評価')}
+      ${candRadios('耐久評価')}
+      ${candRadios('措置内容')}
+    </div>`;
+  // 部材・損傷種類プルダウンに現在の入力値を反映
+  const b=$('#gen_部材'), s=$('#gen_損傷種類');
+  if(b) b.value=inp.部材||''; if(s) s.value=inp.損傷種類||'';
+}
+async function updateDraft(){
+  const curBuzai=$('#gen_部材').value, curSonsho=$('#gen_損傷種類').value;
+  const prev=window._genStruct||{};
+  // 部材/損傷種類を変えた場合は、検索項目で指定したときと同じ“まっさらな再生成”にする
+  // (前回生成の推定グレードや候補を持ち越さない)。
+  const structChanged=(curBuzai!==(prev.部材||''))||(curSonsho!==(prev.損傷種類||''));
+  const GK=['耐荷','耐久','第三者','措置','健全性'];
+  const grades={}; GK.forEach(k=>grades[k]=$('#grade_'+k).value);
+  const prevGrades=(window._gen&&window._gen.grades)||{};
+  // グレードを修正した場合は、修正後の値で類似所見を再検索し、評価本文も再導出する
+  // (前回グレードの評価文をtextareaから持ち越さない=B修正時にA文が残る不具合対策)。
+  const gradeChanged=GK.some(k=>grades[k]!==(prevGrades[k]||''));
+  const input=Object.assign({},(window._genInput||genInput()),{部材:curBuzai, 損傷種類:curSonsho});
+  window._genInput=input;
+  let payload, fullRender=false;
+  if(structChanged){
+    payload=input;                       // selectionを付けない = openGen(検索項目指定)と同一
+    fullRender=true;
+  }else if(gradeChanged){
+    // 修正後グレードで再検索し、状態/原因/進行性・評価本文とも候補を作り直す
+    // (入力値/R3があれば候補先頭に来るので保持される)。評価本文はグレード整合の類似所見から。
+    payload=Object.assign({},input,{selection:{grades:grades}});
+    fullRender=true;
+  }else{
+    const selection={状態:$('#gen_状態').value, 原因:$('#gen_原因').value, 進行性:$('#gen_進行性').value,
+      耐荷評価:$('#gen_耐荷評価').value, 耐久評価:$('#gen_耐久評価').value, 措置内容:$('#gen_措置内容').value, grades:grades};
+    payload=Object.assign({},input,{selection:selection});
+  }
+  $('#status').innerHTML='<span class="spin"></span> 再検索して更新中...';
+  const r=await window.pywebview.api.generate_shoken(payload);
+  $('#status').textContent='';
+  if(!r.ok){ showErr(r.msg||'更新失敗'); return; }
+  window._gen=r;
+  window._genStruct={部材:curBuzai, 損傷種類:curSonsho};
+  if(fullRender){
+    renderGen(r);                        // グレード・候補・評価本文欄も作り直す
+  }else{
+    $('#genDraft').value=r.draft||'';
+    $('#genCombo').textContent=r.template?r.template.combo:'(該当なし)';
+  }
+}
+function copyDraft(){
+  const t=$('#genDraft').value;
+  navigator.clipboard.writeText(t).then(()=>{ $('#status').textContent='ドラフトをコピーしました。'; },
+    ()=>{ $('#genDraft').select(); document.execCommand('copy'); $('#status').textContent='コピーしました。'; });
+}
+</script>
+</body>
+</html>
