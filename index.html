@@ -171,10 +171,11 @@
   .manual.show{display:block}
   .manual h3{margin:0 0 14px;font-size:14px;color:var(--steel-d);display:flex;align-items:center;gap:8px}
   .mgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 16px;margin-bottom:14px}
-  .fld{display:flex;flex-direction:column;gap:4px}
+  .fld{display:flex;flex-direction:column;gap:4px;min-width:0}
   .fld label{font-size:11.5px;color:var(--ink-soft);font-weight:600}
   .fld select,.fld input,.fld textarea{border:1px solid var(--line);border-radius:6px;
-    padding:7px 9px;font-size:13px;font-family:inherit;background:#fcfdfe;color:var(--ink)}
+    padding:7px 9px;font-size:13px;font-family:inherit;background:#fcfdfe;color:var(--ink);
+    width:100%;max-width:100%;box-sizing:border-box}
   .fld textarea{resize:vertical;min-height:54px}
   .fld.wide{grid-column:1/-1}
   .fld.span2{grid-column:span 2}
