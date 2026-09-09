@@ -31,6 +31,13 @@
       .then(function(r){return r.text().then(function(t){return t?JSON.parse(t):null;});});
   }
   function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+  // 端末ごとのセッションID(前回調書の状態をPC側で分離する用。同一オリジンなのでiframeとも共有される)
+  function getSid(){
+    var s=null; try{ s=localStorage.getItem('relay_sid'); }catch(e){}
+    if(!s){ try{ s=(crypto.randomUUID?crypto.randomUUID():'s'+Date.now()+Math.random().toString(16).slice(2)); }catch(e){ s='s'+Date.now(); }
+      try{ localStorage.setItem('relay_sid',s); }catch(e){} }
+    return s;
+  }
   var _busy=0;
   function _spin(on){
     var el=document.getElementById('__relaySpin');
@@ -46,7 +53,7 @@
   async function callApi(name,args){
     _busy++; _spin(true);
     try{
-      var req=await enc({name:name,args:args});
+      var req=await enc({name:name,args:args,sid:getSid()});
       var ins=await sreq('POST','jobs',{req:req},'return=representation');
       var id=ins&&ins[0]&&ins[0].id;
       if(!id) return {ok:false,msg:'リレー投入に失敗しました'};
